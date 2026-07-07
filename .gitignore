@@ -1,0 +1,14 @@
+# 编译产物
+*.so
+*.dylib
+*.dll
+*.h
+
+# Go
+/vendor/
+
+# 本地编辑器/系统
+.DS_Store
+*.swp
+.idea/
+.vscode/
