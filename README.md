@@ -63,6 +63,17 @@ curl http://localhost:8317/v1/chat/completions \
 
 流式 / 非流式都支持;非流式请求会被内部转成流式再聚合(CodeBuddy 上游 `code 11101` 拒绝非流式)。
 
+## Claude Code 兼容性
+
+腾讯 CodeBuddy 的内容审核把 Claude Code 的两句固定 system 模板逐字加进了黑名单,命中即回"敏感内容"拒答:
+
+- `You are Claude Code, Anthropic's official CLI for Claude.`(身份句)
+- `Main branch (you will usually use this for PRs)`(git 注入句)
+
+任何一字改动都绕过(精确匹配,非语义审核)。workbuddy 转发前会自动把这两句做最小改写(`CLI`→`CLI tool`、`Main branch`→`Default branch`),语义不变,Claude Code 照常工作。
+
+属于 cat-and-mouse:腾讯哪天多加模板句,得跟着改 `sanitizeBlockedTemplates`。
+
 ## License
 
 MIT。
