@@ -799,6 +799,9 @@ func rewriteSystemForUpstream(payload []byte) []byte {
 			changed = true
 		}
 	}
+	if forceMaxThinking(obj) {
+		changed = true
+	}
 	if !changed {
 		return payload
 	}
@@ -846,6 +849,22 @@ func sanitizeBlockedTemplates(s string) string {
 		"Main branch (you will usually use this for PRs)",
 		"Default branch (you will usually use this for PRs)")
 	return s
+}
+
+// forceMaxThinking pins reasoning_effort to "high" for hy3-family models so
+// Tencent Hunyuan 3 always reasons at maximum depth. CodeBuddy only honors
+// "high" for deep thinking (medium/low/max/xhigh/ultra all fall back to no
+// reasoning), so we override whatever the client sent. Returns true if changed.
+func forceMaxThinking(obj map[string]any) bool {
+	model, _ := obj["model"].(string)
+	if !strings.HasPrefix(model, "hy3") {
+		return false
+	}
+	if eff, _ := obj["reasoning_effort"].(string); eff == "high" {
+		return false
+	}
+	obj["reasoning_effort"] = "high"
+	return true
 }
 
 // aggregateCompletion folds an SSE stream into a single non-streaming
