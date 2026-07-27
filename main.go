@@ -995,11 +995,11 @@ func rewriteContentField(msg map[string]any) bool {
 
 func sanitizeBlockedTemplates(s string) string {
 	s = strings.ReplaceAll(s,
-		"You are Claude Code, Anthropic's official CLI for Claude.",
-		"You are Claude Code, Anthropic's official CLI tool for Claude.")
+		"You are Claude Code, Anthropic's official CLI tool for Claude.",
+		"You are Claude Code, Anthropic's official command-line tool for Claude.")
 	s = strings.ReplaceAll(s,
-		"Main branch (you will usually use this for PRs)",
-		"Default branch (you will usually use this for PRs)")
+		"Default branch (you will usually use this for PRs)",
+		"Primary branch (you will usually use this for PRs)")
 	return s
 }
 
