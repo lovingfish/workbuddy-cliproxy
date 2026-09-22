@@ -9,6 +9,9 @@ workbuddy.json
 
 # Go
 /vendor/
+/.upstream/
+/artifacts/
+__pycache__/
 
 # 本地编辑器/系统
 .DS_Store

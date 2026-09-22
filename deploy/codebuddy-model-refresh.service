@@ -1,0 +1,19 @@
+[Unit]
+Description=Refresh CodeBuddy account model catalog
+After=network-online.target cliproxyapi.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecCondition=/usr/bin/systemctl is-active --quiet cliproxyapi.service
+User=cliproxyapi
+Group=cliproxyapi
+LoadCredential=management.json:/etc/cliproxyapi/model-refresh.json
+ExecStart=/usr/bin/python3 /opt/workbuddy-cliproxy/refresh_models.py
+TimeoutStartSec=120
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+UMask=0077
+MemoryMax=128M
