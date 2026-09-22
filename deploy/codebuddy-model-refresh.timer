@@ -1,0 +1,11 @@
+[Unit]
+Description=Keep CodeBuddy model discovery and routes current
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=10s
+Unit=codebuddy-model-refresh.service
+
+[Install]
+WantedBy=timers.target

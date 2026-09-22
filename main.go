@@ -61,6 +61,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -140,7 +141,12 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 	}
 	raw, errHandle := handleMethod(C.GoString(method), requestBytes)
 	if errHandle != nil {
-		writeResponse(response, errorEnvelope("plugin_error", errHandle.Error()))
+		status := 0
+		var statusError interface{ StatusCode() int }
+		if errors.As(errHandle, &statusError) {
+			status = statusError.StatusCode()
+		}
+		writeResponse(response, errorEnvelope("plugin_error", errHandle.Error(), status))
 		return 1
 	}
 	writeResponse(response, raw)
@@ -227,9 +233,16 @@ func streamClose(streamID string) {
 func handleMethod(method string, request []byte) ([]byte, error) {
 	switch method {
 	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
+		if err := configureCatalog(request); err != nil {
+			return nil, err
+		}
 		return okEnvelope(wbRegistration())
-	case pluginabi.MethodModelStatic, pluginabi.MethodModelForAuth:
-		return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: wbModels()})
+	case pluginabi.MethodModelStatic:
+		return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: []pluginapi.ModelInfo{}})
+	case pluginabi.MethodModelForAuth:
+		return handleCatalogForAuth(request)
+	case pluginabi.MethodResponseInterceptAfter:
+		return handleCatalogResponse(request)
 	case pluginabi.MethodAuthIdentifier:
 		return okEnvelope(identifierResponse{Identifier: providerName})
 	case pluginabi.MethodAuthParse:
@@ -262,8 +275,9 @@ type envelope struct {
 }
 
 type envelopeError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	HTTPStatus int    `json:"http_status,omitempty"`
 }
 
 type identifierResponse struct {
@@ -277,6 +291,7 @@ type registration struct {
 }
 
 type registrationCapability struct {
+	ResponseInterceptor   bool                         `json:"response_interceptor"`
 	ModelProvider         bool                         `json:"model_provider"`
 	AuthProvider          bool                         `json:"auth_provider"`
 	Executor              bool                         `json:"executor"`
@@ -295,7 +310,7 @@ func wbRegistration() registration {
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata: pluginapi.Metadata{
 			Name:             providerName,
-			Version:          "0.1.0",
+			Version:          "0.2.0-catalog",
 			Author:           "lovingfish (clean-room rebuild; original workbuddy by Sliverkiss)",
 			GitHubRepository: "https://github.com/lovingfish/workbuddy-cliproxy",
 		},
@@ -303,46 +318,12 @@ func wbRegistration() registration {
 			ModelProvider:         true,
 			AuthProvider:          true,
 			Executor:              true,
-			ExecutorModelScope:    pluginapi.ExecutorModelScopeBoth,
+			ExecutorModelScope:    pluginapi.ExecutorModelScopeOAuth,
+			ResponseInterceptor:   true,
 			ExecutorInputFormats:  []string{"chat-completions"},
 			ExecutorOutputFormats: []string{"chat-completions"},
 		},
 	}
-}
-
-func wbModels() []pluginapi.ModelInfo {
-	const maxCompletionTokens int64 = 8192
-	specs := []struct {
-		id            string
-		name          string
-		contextLength int64
-	}{
-		{"glm-5.2", "GLM-5.2", 1000000},
-		{"glm-5.1", "GLM-5.1", 131072},
-		{"glm-5v-turbo", "GLM-5V Turbo", 131072},
-		{"kimi-k2.7", "Kimi K2.7", 262144},
-		{"minimax-m3-pay", "MiniMax M3", 204800},
-		{"hy3", "Hy3", 262144},
-		{"hy3-preview", "Hy3 Preview", 262144},
-		{"hy3-preview-agent", "Hy3 Preview Agent", 262144},
-		{"deepseek-v4-pro", "DeepSeek V4 Pro", 1000000},
-		{"deepseek-v4-flash", "DeepSeek V4 Flash", 1000000},
-	}
-	models := make([]pluginapi.ModelInfo, 0, len(specs))
-	for _, m := range specs {
-		models = append(models, pluginapi.ModelInfo{
-			ID:                         m.id,
-			Object:                     "model",
-			OwnedBy:                    providerName,
-			DisplayName:                m.name,
-			Name:                       m.id,
-			SupportedGenerationMethods: []string{"chat"},
-			ContextLength:              m.contextLength,
-			MaxCompletionTokens:        maxCompletionTokens,
-			UserDefined:                true,
-		})
-	}
-	return models
 }
 
 // -----------------------------------------------------------------------------
@@ -684,7 +665,10 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	}
 	// CodeBuddy rejects non-stream requests (code 11101), so always stream
 	// upstream and fold the chunks into a single chat.completion object.
-	body := rewriteSystemForUpstream(forceStreamBody(req.Payload, req.OriginalRequest))
+	body, err := prepareUpstreamPayload(req, sa)
+	if err != nil {
+		return nil, err
+	}
 	httpReq, err := http.NewRequest(http.MethodPost, endpointChat, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -697,7 +681,7 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		payload, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("upstream %d: %s", resp.StatusCode, truncate(string(payload), 200))
+		return nil, &requestError{status: resp.StatusCode, message: fmt.Sprintf("upstream %d: %s", resp.StatusCode, truncate(string(payload), 200))}
 	}
 	completion, err := aggregateCompletion(resp.Body, req.Model)
 	if err != nil {
@@ -723,11 +707,10 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	body := req.Payload
-	if len(body) == 0 {
-		body = req.OriginalRequest
+	body, err := prepareUpstreamPayload(req.ExecutorRequest, sa)
+	if err != nil {
+		return nil, err
 	}
-	body = rewriteSystemForUpstream(body)
 
 	headers := streamHeaders()
 	sseFramed := clientNeedsSSEFrame(req.Metadata)
@@ -907,25 +890,6 @@ func isEmptyValue(v any) bool {
 	return false
 }
 
-// forceStreamBody returns the request body with "stream":true set, since the
-// upstream rejects non-streaming chat requests.
-func forceStreamBody(payload, original []byte) []byte {
-	src := payload
-	if len(src) == 0 {
-		src = original
-	}
-	var obj map[string]any
-	if json.Unmarshal(src, &obj) != nil {
-		return src
-	}
-	obj["stream"] = true
-	out, err := json.Marshal(obj)
-	if err != nil {
-		return src
-	}
-	return out
-}
-
 // rewriteSystemForUpstream neutralizes Claude Code template phrases that
 // Tencent CodeBuddy's content filter blocklists verbatim — the agent identity
 // line ("You are Claude Code, Anthropic's official CLI for Claude.") and the
@@ -950,9 +914,6 @@ func rewriteSystemForUpstream(payload []byte) []byte {
 		if rewriteContentField(msg) {
 			changed = true
 		}
-	}
-	if forceMaxThinking(obj) {
-		changed = true
 	}
 	if !changed {
 		return payload
@@ -1003,29 +964,13 @@ func sanitizeBlockedTemplates(s string) string {
 	return s
 }
 
-// forceMaxThinking pins reasoning_effort to "high" for hy3-family models so
-// Tencent Hunyuan 3 always reasons at maximum depth. CodeBuddy only honors
-// "high" for deep thinking (medium/low/max/xhigh/ultra all fall back to no
-// reasoning), so we override whatever the client sent. Returns true if changed.
-func forceMaxThinking(obj map[string]any) bool {
-	model, _ := obj["model"].(string)
-	if !strings.HasPrefix(model, "hy3") {
-		return false
-	}
-	if eff, _ := obj["reasoning_effort"].(string); eff == "high" {
-		return false
-	}
-	obj["reasoning_effort"] = "high"
-	return true
-}
-
 // aggregateCompletion folds an SSE stream into a single non-streaming
 // chat.completion object (used for non-stream client requests).
 func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 	var content, reasoning, role, respModel, respID, finish string
 	var created int64
 	var usage map[string]any
-	var toolCalls []map[string]any
+	toolCallsByIndex := map[int]map[string]any{}
 
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
@@ -1064,9 +1009,9 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 					reasoning += v
 				}
 				if tcs, ok := delta["tool_calls"].([]any); ok {
-					for _, tc := range tcs {
+					for index, tc := range tcs {
 						if call, ok := tc.(map[string]any); ok {
-							toolCalls = append(toolCalls, call)
+							mergeToolCallDelta(toolCallsByIndex, call, index)
 						}
 					}
 				}
@@ -1077,6 +1022,10 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 		}
 	}
 
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read upstream stream: %w", err)
+	}
+	toolCalls := orderedToolCalls(toolCallsByIndex)
 	message := map[string]any{"role": firstNonEmpty(role, "assistant"), "content": content}
 	if reasoning != "" {
 		message["reasoning_content"] = reasoning
@@ -1137,8 +1086,12 @@ func okEnvelope(v any) ([]byte, error) {
 	return json.Marshal(envelope{OK: true, Result: result})
 }
 
-func errorEnvelope(code, message string) []byte {
-	raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{Code: code, Message: message}})
+func errorEnvelope(code, message string, statuses ...int) []byte {
+	status := 0
+	if len(statuses) > 0 {
+		status = statuses[0]
+	}
+	raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{Code: code, Message: message, HTTPStatus: status}})
 	return raw
 }
 
