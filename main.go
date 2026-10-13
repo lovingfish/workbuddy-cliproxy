@@ -228,8 +228,10 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 	switch method {
 	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
 		return okEnvelope(wbRegistration())
-	case pluginabi.MethodModelStatic, pluginabi.MethodModelForAuth:
+	case pluginabi.MethodModelStatic:
 		return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: wbModels()})
+	case pluginabi.MethodModelForAuth:
+		return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: modelsForAuth(request)})
 	case pluginabi.MethodAuthIdentifier:
 		return okEnvelope(identifierResponse{Identifier: providerName})
 	case pluginabi.MethodAuthParse:
@@ -295,7 +297,7 @@ func wbRegistration() registration {
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata: pluginapi.Metadata{
 			Name:             providerName,
-			Version:          "0.1.0",
+			Version:          "0.2.0",
 			Author:           "lovingfish (clean-room rebuild; original workbuddy by Sliverkiss)",
 			GitHubRepository: "https://github.com/lovingfish/workbuddy-cliproxy",
 		},
@@ -327,6 +329,13 @@ func wbModels() []pluginapi.ModelInfo {
 		{"hy3-preview-agent", "Hy3 Preview Agent", 262144},
 		{"deepseek-v4-pro", "DeepSeek V4 Pro", 1000000},
 		{"deepseek-v4-flash", "DeepSeek V4 Flash", 1000000},
+		{"glm-5.3", "GLM-5.3", 1000000},
+		{"glm-5.3-flash", "GLM-5.3 Flash", 1000000},
+		{"hy4-preview", "HY4 Preview", 262144},
+		{"hy4-preview-f", "HY4 Preview Fast", 262144},
+		{"kimi-k3", "Kimi K3", 262144},
+		{"kimi-k2.8-preview", "Kimi K2.8 Preview", 262144},
+		{"deepseek-v4.1-flash", "DeepSeek V4.1 Flash", 1000000},
 	}
 	models := make([]pluginapi.ModelInfo, 0, len(specs))
 	for _, m := range specs {
@@ -1026,6 +1035,7 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 	var created int64
 	var usage map[string]any
 	var toolCalls []map[string]any
+	callPositions := map[int]int{}
 
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
@@ -1065,8 +1075,35 @@ func aggregateCompletion(r io.Reader, model string) ([]byte, error) {
 				}
 				if tcs, ok := delta["tool_calls"].([]any); ok {
 					for _, tc := range tcs {
-						if call, ok := tc.(map[string]any); ok {
-							toolCalls = append(toolCalls, call)
+						call, ok := tc.(map[string]any)
+						if !ok {
+							continue
+						}
+						idx := 0
+						if v, ok := call["index"].(float64); ok {
+							idx = int(v)
+						}
+						pos, exists := callPositions[idx]
+						if !exists {
+							pos = len(toolCalls)
+							callPositions[idx] = pos
+							toolCalls = append(toolCalls, map[string]any{"id": "", "type": "function", "function": map[string]any{"name": "", "arguments": ""}})
+						}
+						merged := toolCalls[pos]
+						if id, ok := call["id"].(string); ok && id != "" {
+							merged["id"] = id
+						}
+						if typ, ok := call["type"].(string); ok && typ != "" {
+							merged["type"] = typ
+						}
+						if fn, ok := call["function"].(map[string]any); ok {
+							target := merged["function"].(map[string]any)
+							if name, ok := fn["name"].(string); ok {
+								target["name"] = target["name"].(string) + name
+							}
+							if args, ok := fn["arguments"].(string); ok {
+								target["arguments"] = target["arguments"].(string) + args
+							}
 						}
 					}
 				}

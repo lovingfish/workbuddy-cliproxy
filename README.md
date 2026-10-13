@@ -85,3 +85,21 @@ hy3 系列(`hy3` / `hy3-preview` / `hy3-preview-agent`)自动开最大思考:wor
 ## License
 
 MIT。
+
+## Fork improvements: dynamic models and tool-call assembly
+
+The `feature/dynamic-models-toolcalls` branch adds optional **per-account model discovery**.
+It queries CodeBuddy's `/v3/config` with two client user agents and the enterprise
+model catalog. Results are merged and cached for 30 minutes; network/API failures
+fall back to the built-in model catalog. Models are filtered to exclude image,
+completion, disabled, and pseudo-model identifiers. The static fallback includes
+GLM-5.3, HY4, Kimi K3, and DeepSeek V4.1 Flash candidate IDs. Being listed **does
+not guarantee your account is authorized to invoke a model**.
+
+It also assembles streaming `tool_calls` deltas by call index when a client makes
+non-streaming chat completion requests, rather than treating fragments as separate
+function calls. Unit tests cover both behaviors.
+
+Build with Go 1.26+ and CGO enabled, e.g. `CGO_ENABLED=1 go build -buildmode=c-shared -o workbuddy.so .`.
+The changes target the existing CPA v8 plugin host without changing its OAuth
+storage format. Keep a backup of the previously working `.so` before replacement.
